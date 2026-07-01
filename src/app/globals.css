@@ -1,0 +1,309 @@
+@import "tailwindcss";
+
+/* ─── Design Tokens — Light Theme ───────────────────────────────────────── */
+:root {
+  /* Backgrounds */
+  --bg:           #faf8f4;
+  --bg-2:         #f3f0ea;
+  --surface:      #ffffff;
+  --surface-2:    #faf8f4;
+  --surface-3:    #f3f0ea;
+
+  /* Text */
+  --fg:           #0f1117;
+  --fg-2:         #4a5568;
+  --fg-3:         #8492a6;
+
+  /* Accent — GoFast green */
+  --accent:       #1bb908;
+  --accent-hover: #15960a;
+  --accent-dim:   rgba(27,185,8,0.10);
+  --accent-glow:  rgba(27,185,8,0.20);
+
+  /* Secondary — GoFast orange */
+  --secondary:       #ff580d;
+  --secondary-hover: #e04500;
+  --secondary-dim:   rgba(255,88,13,0.10);
+  --secondary-glow:  rgba(255,88,13,0.20);
+
+  /* Semantic */
+  --success:      #1bb908;
+  --success-bg:   rgba(27,185,8,0.08);
+  --warning:      #ff580d;
+  --warning-bg:   rgba(255,88,13,0.08);
+  --danger:       #dc2626;
+  --danger-bg:    rgba(220,38,38,0.08);
+  --info:         #1bb908;
+  --info-bg:      rgba(27,185,8,0.08);
+
+  /* Borders */
+  --border:       #e8e4df;
+  --border-2:     #d6d0c9;
+
+  /* Primary (alias of accent) */
+  --primary:      #1bb908;
+  --primary-hover:#15960a;
+  --primary-bg:   rgba(27,185,8,0.08);
+
+  /* Legacy compat */
+  --background:   var(--bg);
+  --foreground:   var(--fg);
+  --muted:        var(--fg-3);
+}
+
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+
+  --color-primary:    var(--primary);
+  --color-secondary:  var(--secondary);
+  --color-surface:    var(--surface);
+  --color-border:     var(--border);
+  --color-muted:      var(--fg-3);
+  --color-success:    var(--success);
+  --color-warning:    var(--warning);
+  --color-danger:     var(--danger);
+  --color-accent:     var(--accent);
+  --font-sans: var(--font-montserrat), system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), monospace;
+}
+
+/* ─── Base ───────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-montserrat), system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--fg-3); }
+
+/* ─── Selection ──────────────────────────────────────────────────────────── */
+::selection { background: var(--accent-dim); color: var(--accent); }
+
+/* ─── Focus ──────────────────────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ─── Animations ─────────────────────────────────────────────────────────── */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.anim-fade-up { animation: fade-up 0.3s ease both; }
+.anim-fade-in { animation: fade-in 0.2s ease both; }
+.s1 { animation-delay: 0.05s; }
+.s2 { animation-delay: 0.10s; }
+.s3 { animation-delay: 0.15s; }
+.s4 { animation-delay: 0.20s; }
+.s5 { animation-delay: 0.25s; }
+.s6 { animation-delay: 0.30s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-fade-up, .anim-fade-in { animation: none !important; }
+}
+
+/* ─── Data table ─────────────────────────────────────────────────────────── */
+.data-table { width: 100%; border-collapse: collapse; }
+.data-table th {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+  padding: 10px 16px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+.data-table td {
+  padding: 11px 16px;
+  font-size: 0.875rem;
+  color: var(--fg-2);
+  border-bottom: 1px solid var(--border);
+  transition: background 0.12s;
+}
+.data-table tbody tr:hover td {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+.data-table tbody tr:last-child td { border-bottom: none; }
+
+/* ─── Mono ───────────────────────────────────────────────────────────────── */
+.mono { font-family: var(--font-jetbrains-mono), monospace; font-size: 0.8em; }
+
+/* ─── Map container ──────────────────────────────────────────────────────── */
+.map-container { width: 100%; height: 100%; min-height: 300px; }
+
+
+/* ─── Custom dropdown ────────────────────────────────────────────────────── */
+.dropdown-menu {
+  position: absolute;
+  z-index: 200;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: #ffffff;
+  border: 1px solid var(--border-2);
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.06);
+  overflow: hidden;
+  animation: fade-up 0.15s ease both;
+}
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  font-size: 0.875rem;
+  color: var(--fg-2);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+  border: none;
+  background: transparent;
+  text-align: left;
+}
+.dropdown-item:hover, .dropdown-item[data-highlighted] {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+.dropdown-item[data-selected] {
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ─── DatePicker Calendar (react-day-picker v10) ─────────────────────────── */
+.gfd-datepicker-popover .rdp-root {
+  /* Override the library's default accent variables with our theme */
+  --rdp-accent-color:            var(--accent);
+  --rdp-accent-background-color: var(--accent-dim);
+  --rdp-today-color:             var(--accent);
+  --rdp-selected-border:         2px solid var(--accent);
+
+  /* Compact sizing */
+  --rdp-day-height:         36px;
+  --rdp-day-width:          36px;
+  --rdp-day_button-height:  34px;
+  --rdp-day_button-width:   34px;
+  --rdp-day_button-border-radius: 8px;
+  --rdp-nav_button-height:  30px;
+  --rdp-nav_button-width:   30px;
+  --rdp-nav-height:         40px;
+
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  padding: 8px 10px 12px;
+}
+
+/* Month caption (title + nav) */
+.gfd-datepicker-popover .rdp-month_caption {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--fg);
+  padding-bottom: 6px;
+}
+
+/* Nav prev/next buttons */
+.gfd-datepicker-popover .rdp-button_previous,
+.gfd-datepicker-popover .rdp-button_next {
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--fg-2);
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.gfd-datepicker-popover .rdp-button_previous:hover,
+.gfd-datepicker-popover .rdp-button_next:hover {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.gfd-datepicker-popover .rdp-chevron {
+  fill: currentColor;
+  width: 14px;
+  height: 14px;
+}
+
+/* Weekday header row */
+.gfd-datepicker-popover .rdp-weekday {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-3);
+  opacity: 1;
+}
+
+/* Day cells */
+.gfd-datepicker-popover .rdp-day_button {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg-2);
+  border-radius: 8px;
+  transition: background 0.12s, color 0.12s;
+}
+.gfd-datepicker-popover .rdp-day_button:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--fg);
+  border-color: transparent;
+}
+
+/* Today */
+.gfd-datepicker-popover .rdp-today:not(.rdp-outside) {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* Selected day */
+.gfd-datepicker-popover .rdp-selected .rdp-day_button {
+  background: var(--accent);
+  color: #ffffff;
+  border-color: var(--accent);
+  font-weight: 700;
+}
+.gfd-datepicker-popover .rdp-selected .rdp-day_button:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* ─── Landing Page Tokens ────────────────────────────────────────────────── */
+[data-page="landing"] {
+  --brand-orange:      #ff580d;
+  --brand-green:       #1bb908;
+  --brand-black:       #0d0d0d;
+  --brand-red:         #e51c1c;
+  --brand-orange-dim:  rgba(255, 88, 13, 0.12);
+  --brand-orange-glow: rgba(255, 88, 13, 0.20);
+  --brand-green-dim:   rgba(27, 185, 8, 0.10);
+  --brand-red-dim:     rgba(229, 28, 28, 0.10);
+  --brand-white:       #ffffff;
+  --landing-bg:        #fafaf9;
+  --landing-surface:   #ffffff;
+  --landing-text:      #0d0d0d;
+  --landing-text-2:    #4a4a4a;
+  --landing-border:    #e8e4df;
+  --stat-color:        #e51c1c;
+}
