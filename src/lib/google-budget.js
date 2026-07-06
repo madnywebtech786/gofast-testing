@@ -11,19 +11,29 @@ import redis from '@/lib/redis'
  *   google:day:{service}:{YYYY-MM-DD}          (TTL 48h)
  *   google:mon:{service}:{YYYY-MM}             (TTL 40 days)
  *
- * Free tier per SKU: 10,000 events/month each (as of March 2025).
- * Soft cap at 85% so we degrade before hitting the hard ceiling.
+ * geocoding and places-* are split into -customer / -driver buckets (see
+ * geocode/route.js and places/route.js, which pass session.role === 'driver'
+ * ? 'driver' : 'customer' as the service suffix) so a burst of customer
+ * booking traffic can't starve driver navigation's budget, or vice versa.
+ * `directions` has no customer caller today (only DriverMap.js), so it stays
+ * a single bucket.
  *
- * Soft caps calibrated for 5 drivers, 20 packages/day, 26 working days/month
- * with a 20-30% buffer above calculated baseline.
+ * Billing is enabled on the Google Cloud project (client has accepted
+ * charges beyond the free tier — operational uptime takes priority over
+ * staying under the free 10,000/month/SKU ceiling). These limits are sized
+ * as a SAFETY NET against a runaway bug (e.g. an infinite retry loop), not
+ * as a cost-avoidance ceiling — set at roughly 3x realistic daily volume for
+ * 10 drivers / 25 stops each and 50 customer bookings/day, so normal
+ * operation and reasonable growth never gets throttled.
  */
 
 export const GOOGLE_SERVICES = {
-  maps:                 { monthly: 10_000, daily: 320,  perMinute: 80  },
-  directions:           { monthly: 10_000, daily: 250,  perMinute: 60  },
-  geocoding:            { monthly: 10_000, daily: 250,  perMinute: 60  },
-  'places-autocomplete':{ monthly: 10_000, daily: 500,  perMinute: 120 },
-  'places-details':     { monthly: 10_000, daily: 100,  perMinute: 30  },
+  maps:                          { monthly: 10_000, daily: 320,  perMinute: 80  },
+  directions:                    { monthly: 21_840, daily: 840,  perMinute: 90  },
+  'geocoding-customer':          { monthly: 7_800,  daily: 300,  perMinute: 60  },
+  'geocoding-driver':            { monthly: 19_500, daily: 750,  perMinute: 90  },
+  'places-autocomplete-customer':{ monthly: 62_400, daily: 2_400,perMinute: 180 },
+  'places-details-customer':     { monthly: 7_800,  daily: 300,  perMinute: 60  },
 }
 
 const SOFT_CAP_FRACTION = 0.85

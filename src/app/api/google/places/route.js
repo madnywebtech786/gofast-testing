@@ -8,10 +8,20 @@ import { checkRateLimit } from '@/lib/redis'
 // Autocomplete fires ~6 calls per address search (one per debounced keystroke
 // + 1 details). 800/hr ≈ ~85 searches/hour per caller — effectively unlimited
 // for a real customer, while still capping a leaked key or bot. The global
-// daily soft cap in google-budget.js ('places-autocomplete') is the budget
-// backstop on top of this per-caller limit.
+// daily soft caps in google-budget.js ('places-autocomplete-customer' /
+// 'places-details-customer') are the budget backstop on top of this
+// per-caller limit.
 const PLACES_LIMIT  = 800  // per caller per hour
 const PLACES_WINDOW = 3600
+
+// Per-CUSTOMER daily allowances — distinct from PLACES_LIMIT above (hourly)
+// and from the app-wide shared budget in google-budget.js. Keyed per
+// individual customer (or guest IP) so one customer's usage never counts
+// against another's daily allowance. Rolling 24h window from that
+// customer's first call, not calendar-day.
+const CUSTOMER_AUTOCOMPLETE_DAILY_LIMIT  = 1200
+const CUSTOMER_DETAILS_DAILY_LIMIT       = 400
+const CUSTOMER_DAILY_WINDOW              = 86400
 
 const AUTOCOMPLETE_API = 'https://places.googleapis.com/v1/places:autocomplete'
 const DETAILS_API      = 'https://places.googleapis.com/v1/places'
@@ -40,7 +50,8 @@ function normalizeQuery(q) {
  * Autocomplete mode (?q=...):
  *   - Returns { predictions: [{ placeId, description }] }
  *   - Short-circuits to { predictions: [] } for queries < 3 chars
- *   - Budget service: 'places-autocomplete'
+ *   - Budget service: 'places-autocomplete-customer' (app-wide shared pool)
+ *   - Per-customer daily cap: CUSTOMER_AUTOCOMPLETE_DAILY_LIMIT (individual, not shared)
  *   - Cache key: gmaps:places:ac:{normalized-query} (5-min TTL)
  *     Note: sessionToken is NOT part of the cache key — different sessions asking
  *     the same query share the cached predictions. The billing session grouping
@@ -48,7 +59,8 @@ function normalizeQuery(q) {
  *
  * Place Details mode (?placeId=...):
  *   - Returns { lng, lat, address }
- *   - Budget service: 'places-details'
+ *   - Budget service: 'places-details-customer' (app-wide shared pool)
+ *   - Per-customer daily cap: CUSTOMER_DETAILS_DAILY_LIMIT (individual, not shared)
  *   - Cache key: gmaps:places:detail:{placeId} (7-day TTL)
  *   - Passes sessionToken to close the session (groups session as one billing unit)
  *
@@ -71,6 +83,8 @@ export async function GET(request) {
       return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 })
     }
 
+    const callerKey = session?.userId ?? `guest:${ip}`
+
     const { searchParams } = new URL(request.url)
     const placeId      = searchParams.get('placeId')
     const sessionToken = searchParams.get('sessionToken') ?? ''
@@ -84,8 +98,19 @@ export async function GET(request) {
         if (cached && typeof cached === 'object') return NextResponse.json(cached)
       } catch { /* fall through */ }
 
+      // Per-customer daily allowance (see constants above).
+      const { allowed: underDailyCap } = await checkRateLimit(
+        `rate:places-details-daily:${callerKey}`, CUSTOMER_DETAILS_DAILY_LIMIT, CUSTOMER_DAILY_WINDOW,
+      )
+      if (!underDailyCap) {
+        return NextResponse.json({ error: 'Daily limit exceeded' }, { status: 429 })
+      }
+
       try {
-        await checkBudget('places-details')
+        // Customer-only bucket — no driver page calls Places (see
+        // google-budget.js). If a driver flow ever needs Places, add a
+        // 'places-details-driver' bucket rather than sharing this one.
+        await checkBudget('places-details-customer')
       } catch (err) {
         if (err instanceof GoogleBudgetError) {
           return NextResponse.json({ error: 'Google Maps budget exceeded', degraded: true }, { status: 503 })
@@ -143,8 +168,17 @@ export async function GET(request) {
       if (cached && typeof cached === 'object') return NextResponse.json(cached)
     } catch { /* fall through */ }
 
+    // Per-customer daily allowance (see constants above).
+    const { allowed: underAcDailyCap } = await checkRateLimit(
+      `rate:places-autocomplete-daily:${callerKey}`, CUSTOMER_AUTOCOMPLETE_DAILY_LIMIT, CUSTOMER_DAILY_WINDOW,
+    )
+    if (!underAcDailyCap) {
+      return NextResponse.json({ predictions: [], degraded: true })
+    }
+
     try {
-      await checkBudget('places-autocomplete')
+      // Customer-only bucket — see the details-mode comment above.
+      await checkBudget('places-autocomplete-customer')
     } catch (err) {
       if (err instanceof GoogleBudgetError) {
         return NextResponse.json({ predictions: [], degraded: true })

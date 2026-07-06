@@ -5,8 +5,19 @@ import redis from '@/lib/redis'
 import { checkBudget, GoogleBudgetError } from '@/lib/google-budget'
 import { checkRateLimit } from '@/lib/redis'
 
-const GEOCODE_LIMIT  = 40   // requests per caller per hour
+// Per-caller anti-abuse ceiling (distinct from the shared budget above) — a
+// driver working a busy multi-stop shift with reroutes, or a customer
+// re-dragging a map pin repeatedly, can legitimately approach this.
+const GEOCODE_LIMIT  = 120  // requests per caller per hour
 const GEOCODE_WINDOW = 3600
+
+// Per-CUSTOMER daily allowance — distinct from GEOCODE_LIMIT above (which is
+// hourly and shared by drivers too) and from the app-wide shared budget in
+// google-budget.js. This one is keyed per individual customer (or guest IP)
+// so one customer's usage never counts against another's daily allowance.
+// Rolling 24h window from that customer's first call, not calendar-day.
+const CUSTOMER_GEOCODE_DAILY_LIMIT  = 400
+const CUSTOMER_GEOCODE_DAILY_WINDOW = 86400
 
 const GOOGLE_GEOCODE_API = 'https://maps.googleapis.com/maps/api/geocode/json'
 
@@ -29,7 +40,8 @@ function snapCoord(n) {
  *
  * Proxies Google Geocoding API server-side to:
  *   - keep GOOGLE_MAPS_SERVER_KEY out of the browser,
- *   - gate calls via checkBudget (soft-cap free tier),
+ *   - gate calls via checkBudget (app-wide shared soft cap, split geocoding-customer/-driver),
+ *   - gate customer calls via a separate per-individual-customer daily cap (CUSTOMER_GEOCODE_DAILY_LIMIT),
  *   - cache results in Redis (7-day by rounded lng/lat).
  *
  * Returns { address, city } — same shape as /api/mapbox/geocode for drop-in compatibility.
@@ -38,6 +50,11 @@ function snapCoord(n) {
 export async function GET(request) {
   try {
     const session = await getSession()
+    // Drivers and customers (incl. unauthenticated guest bookers) draw from
+    // separate budget buckets — see google-budget.js — so a burst on one
+    // side can't starve the other's geocoding budget.
+    const isDriver = session?.role === 'driver'
+    const budgetService = isDriver ? 'geocoding-driver' : 'geocoding-customer'
 
     const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown'
     const rateLimitKey = session?.userId
@@ -47,6 +64,18 @@ export async function GET(request) {
     const { allowed } = await checkRateLimit(rateLimitKey, GEOCODE_LIMIT, GEOCODE_WINDOW)
     if (!allowed) {
       return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 })
+    }
+
+    // Per-CUSTOMER daily allowance (not applied to drivers — they're covered
+    // by GEOCODE_LIMIT above plus the shared geocoding-driver budget).
+    if (!isDriver) {
+      const dailyKey = session?.userId
+        ? `rate:geocode-customer-daily:${session.userId}`
+        : `rate:geocode-customer-daily-guest:${ip}`
+      const { allowed: underDailyCap } = await checkRateLimit(dailyKey, CUSTOMER_GEOCODE_DAILY_LIMIT, CUSTOMER_GEOCODE_DAILY_WINDOW)
+      if (!underDailyCap) {
+        return NextResponse.json({ error: 'Daily limit exceeded' }, { status: 429 })
+      }
     }
 
     const { searchParams } = new URL(request.url)
@@ -72,7 +101,7 @@ export async function GET(request) {
 
     // Budget check before firing the API call
     try {
-      await checkBudget('geocoding')
+      await checkBudget(budgetService)
     } catch (err) {
       if (err instanceof GoogleBudgetError) {
         // Degrade gracefully — return coordinate string so the map still functions
