@@ -53,7 +53,7 @@ const VoiceGuide = forwardRef(function VoiceGuide(_, ref) {
       window.speechSynthesis.speak(u)
     },
 
-    // stage: 'early' | 'main' | 'final'
+    // stage: 'farOut' | 'early' | 'main' | 'final'
     // distM: live metres to the turn (from GPS, not step.distance)
     speakStep(step, distM, stage) {
       if (!step) return
@@ -67,6 +67,13 @@ const VoiceGuide = forwardRef(function VoiceGuide(_, ref) {
       } else if (stage === 'main') {
         // "Turn right"
         text = instruction
+      } else if (stage === 'farOut') {
+        // Long-range highway advisory (~2km out) — distinct phrasing from
+        // 'early' ("in 500m, turn right") so the driver hears this as a
+        // heads-up to get in the right lane, not the actual turn cue.
+        const d = distM ?? step.distance
+        const distText = d >= 1000 ? `${(d / 1000).toFixed(1)} kilometres` : `${Math.round(d / 10) * 10} metres`
+        text = `In ${distText}, ${instruction}. Please get into the correct lane.`
       } else {
         // 'early' — "In 500 metres, turn right onto Main Street"
         const d = distM ?? step.distance

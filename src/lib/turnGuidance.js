@@ -90,6 +90,40 @@ export const BANNER_HIDE_HIGHWAY_M = 2000
 // finish speaking before the driver reaches the next turn.
 export const SHORT_STEP_M    = 80
 
+// ── Speed-scaled voice thresholds ───────────────────────────────────────────
+// Fixed-distance thresholds (VOICE_EARLY_M etc. above) give wildly different
+// REACTION TIME depending on speed: 500m is ~16s of warning at 110km/h (too
+// late to safely change lanes for a highway exit) but ~60s at 30km/h (reads
+// as premature in the city). Real nav systems trigger primarily off ETA to
+// the maneuver so the driver gets roughly the same reaction time regardless
+// of speed — see target-seconds constants below. Distance is still what
+// nextVoiceStage() actually compares (its crossing-detection/overshoot logic
+// is speed-agnostic and unchanged by this), so speed is converted to an
+// equivalent distance threshold once per tick via speedScaledThresholds().
+export const VOICE_EARLY_TARGET_S = 22   // ~20-25s lead time
+export const VOICE_MAIN_TARGET_S  = 9    // ~8-10s lead time
+export const VOICE_FINAL_TARGET_S = 3.5  // ~3-4s lead time
+
+// Clamp bounds (metres) so the speed-derived distance never collapses too
+// small at low speed (stop-and-go city driving) or runs away too large at
+// high speed (a GPS speed spike shouldn't push "early" out to 2km). Floors
+// sit at-or-near the legacy fixed values so slow/city driving doesn't
+// regress relative to today's behaviour.
+export const VOICE_EARLY_MIN_M = 200,  VOICE_EARLY_MAX_M = 900
+export const VOICE_MAIN_MIN_M  = 60,   VOICE_MAIN_MAX_M  = 300
+export const VOICE_FINAL_MIN_M = 30,   VOICE_FINAL_MAX_M = 80
+
+// New long-range highway advisory — a single-shot heads-up ahead of the
+// early/main/final ladder, not speed-scaled (the point is "a highway
+// maneuver is coming up," not a speed-proportional countdown). Only
+// considered on steps long enough to be a genuine highway approach — see
+// the announceStep.distance gate in computeTurnGuidance below.
+export const VOICE_FAR_OUT_M = 2000
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v))
+}
+
 function haversineM(a, b) {
   const R    = 6371000
   const dLat = (b.lat - a.lat) * Math.PI / 180
@@ -101,22 +135,53 @@ function haversineM(a, b) {
 }
 
 /**
- * Scale the early/main voice thresholds down when the step itself is short,
- * so a 60m street between two turns doesn't try to announce "in 500 metres"
- * (which wouldn't finish before the turn anyway) and so the main/final cues
- * have clear separation from the pass-check within that short distance.
- * Never scales below STEP_PASSED_M + a small margin, so final can still fire.
+ * Scale a set of early/main/final voice thresholds down when the step itself
+ * is short, so a 60m street between two turns doesn't try to announce "in
+ * 500 metres" (which wouldn't finish before the turn anyway) and so the
+ * main/final cues have clear separation from the pass-check within that
+ * short distance. Never scales below `base.final` + a small margin, so
+ * final can still fire. Takes the base thresholds as input (rather than
+ * reading the fixed constants directly) so it applies equally whether the
+ * base came from the legacy fixed values or from speed-scaling below.
  */
-function scaledVoiceThresholds(stepDistanceM) {
+function scaledVoiceThresholds(stepDistanceM, base = { early: VOICE_EARLY_M, main: VOICE_MAIN_M, final: VOICE_FINAL_M }) {
   if (stepDistanceM == null || stepDistanceM >= SHORT_STEP_M) {
-    return { early: VOICE_EARLY_M, main: VOICE_MAIN_M, final: VOICE_FINAL_M }
+    return base
   }
   // Fit early/main inside the step length, leaving final untouched (it's
   // already small) and never letting main collapse into final.
-  const main  = Math.max(VOICE_FINAL_M + 15, Math.min(VOICE_MAIN_M, stepDistanceM * 0.7))
-  const early = Math.max(main + 10, Math.min(VOICE_EARLY_M, stepDistanceM * 1.5))
-  return { early, main, final: VOICE_FINAL_M }
+  const main  = Math.max(base.final + 15, Math.min(base.main, stepDistanceM * 0.7))
+  const early = Math.max(main + 10, Math.min(base.early, stepDistanceM * 1.5))
+  return { early, main, final: base.final }
 }
+
+/**
+ * Derive early/main/final distance thresholds from current driving speed so
+ * announcements give roughly the same REACTION TIME regardless of speed
+ * (see module-header comment above the target-seconds constants). Falls
+ * back to the legacy fixed thresholds when speed is unknown/zero (e.g. the
+ * leg-load seed call, or a driver stopped/just starting to move) — this is
+ * what keeps every pre-existing caller (no speedMps passed) byte-identical
+ * to today's behaviour. Short-step shrinking is then applied on top via
+ * scaledVoiceThresholds, same as the legacy path.
+ */
+function speedScaledThresholds(speedMps, stepDistanceM) {
+  const base = !speedMps || speedMps <= 0
+    ? { early: VOICE_EARLY_M, main: VOICE_MAIN_M, final: VOICE_FINAL_M }
+    : {
+      early: clamp(speedMps * VOICE_EARLY_TARGET_S, VOICE_EARLY_MIN_M, VOICE_EARLY_MAX_M),
+      main:  clamp(speedMps * VOICE_MAIN_TARGET_S,  VOICE_MAIN_MIN_M,  VOICE_MAIN_MAX_M),
+      final: clamp(speedMps * VOICE_FINAL_TARGET_S, VOICE_FINAL_MIN_M, VOICE_FINAL_MAX_M),
+    }
+  return scaledVoiceThresholds(stepDistanceM, base)
+}
+
+// Stage ranks, in firing-priority order (checked final-first so a big
+// single-tick drop resolves to the most-advanced stage instead of silently
+// passing through earlier ones). 0 = nothing spoken yet for this step.
+// farOut (rank 1) is the new long-range highway advisory; early/main/final
+// keep their prior relative order, just shifted up one rank.
+const STAGE_RANK = { farOut: 1, early: 2, main: 3, final: 4 }
 
 /**
  * Decide which voice stage (if any) fires this tick via crossing-detection:
@@ -125,14 +190,17 @@ function scaledVoiceThresholds(stepDistanceM) {
  * big single-tick drop still resolves to the correct stage instead of
  * silently passing through it. Falls back to plain membership when there's
  * no previous distance to compare against (first sample for this step).
+ * farOut is NOT checked here — it has its own crossing check in
+ * computeTurnGuidance because, unlike early/main/final, it must survive
+ * across a step-index advance (see the REAL-API FINDING comment there).
  */
 function nextVoiceStage(prevDist, curDist, thresholds, currentStage) {
   const { early, main, final } = thresholds
   const crossed = (t) => (prevDist == null ? curDist <= t : prevDist > t && curDist <= t)
 
-  if (currentStage < 3 && crossed(final)) return { stage: 3, label: 'final' }
-  if (currentStage < 2 && crossed(main))  return { stage: 2, label: 'main' }
-  if (currentStage < 1 && crossed(early)) return { stage: 1, label: 'early' }
+  if (currentStage < STAGE_RANK.final && crossed(final)) return { stage: STAGE_RANK.final, label: 'final' }
+  if (currentStage < STAGE_RANK.main  && crossed(main))  return { stage: STAGE_RANK.main,  label: 'main' }
+  if (currentStage < STAGE_RANK.early && crossed(early)) return { stage: STAGE_RANK.early, label: 'early' }
   return null
 }
 
@@ -145,28 +213,44 @@ function nextVoiceStage(prevDist, curDist, thresholds, currentStage) {
  * @param {number} params.lng
  * @param {number} params.lat
  * @param {number} params.lastSpokenStepIdx   Step index the voice stage tracker applies to
- * @param {number} params.voiceStage         0=none,1=early,2=main,3=final spoken for lastSpokenStepIdx
+ * @param {number} params.voiceStage         0=none,1=farOut,2=early,3=main,4=final spoken for lastSpokenStepIdx (STAGE_RANK)
  * @param {number|null} [params.prevDistToTurn=null]  Distance-to-turn measured on the PREVIOUS
  *   tick for lastSpokenStepIdx — used for crossing-detection (BUG 3 fix). Pass null on the
  *   first call or after a route reload.
  * @param {boolean} [params.liveGps=true]    false = seed call (banner only, no voice, no ref writes)
+ * @param {number} [params.speedMps=0]       Smoothed driver speed (metres/second). 0/omitted
+ *   falls back to the legacy fixed early/main/final thresholds — see speedScaledThresholds().
+ * @param {number} [params.lastFarOutStepIdx=-1]  Index (within `steps`) of the announceStep
+ *   farOut has already fired for, or -1 if not yet fired for any step. Tracked SEPARATELY from
+ *   lastSpokenStepIdx/voiceStage because farOut must survive a currentIdx advance — see the
+ *   REAL-API FINDING comment in the function body for why (verified against live Deerfoot
+ *   Trail data: gating farOut on the same per-step reset as early/main/final made it fire
+ *   immediately-on-arrival instead of getting real crossing-detection ticks toward 2000m,
+ *   whenever the immediately-prior real road segment was itself shorter than 2000m).
+ * @param {number|null} [params.prevDistFarOut=null]  Distance-to-turn measured on the PREVIOUS
+ *   tick for farOut's crossing-detection specifically — independent of prevDistToTurn/priorDist
+ *   (which reset on every step advance). Pass null on the first call or after a route reload.
  *
  * @returns {{
  *   newIdx: number,
  *   banner: {announceStep, instruction, distanceM, thenStep} | null,
- *   voiceEvent: {step, distToTurn, stage: 'early'|'main'|'final'} | null,
+ *   voiceEvent: {step, distToTurn, stage: 'farOut'|'early'|'main'|'final'} | null,
  *   newLastSpokenStepIdx: number,
  *   newVoiceStage: number,
  *   newPrevDistToTurn: number|null,
+ *   newLastFarOutStepIdx: number,
+ *   newPrevDistFarOut: number|null,
  * }}
  */
 export function computeTurnGuidance({
-  steps, currentIdx, lng, lat, lastSpokenStepIdx, voiceStage, prevDistToTurn = null, liveGps = true,
+  steps, currentIdx, lng, lat, lastSpokenStepIdx, voiceStage, prevDistToTurn = null, liveGps = true, speedMps = 0,
+  lastFarOutStepIdx = -1, prevDistFarOut = null,
 }) {
   if (!steps?.length) {
     return {
       newIdx: currentIdx, banner: null, voiceEvent: null,
       newLastSpokenStepIdx: lastSpokenStepIdx, newVoiceStage: voiceStage, newPrevDistToTurn: prevDistToTurn,
+      newLastFarOutStepIdx: lastFarOutStepIdx, newPrevDistFarOut: prevDistFarOut,
     }
   }
 
@@ -177,6 +261,7 @@ export function computeTurnGuidance({
     return {
       newIdx: idx, banner: null, voiceEvent: null,
       newLastSpokenStepIdx: lastSpokenStepIdx, newVoiceStage: voiceStage, newPrevDistToTurn: prevDistToTurn,
+      newLastFarOutStepIdx: lastFarOutStepIdx, newPrevDistFarOut: prevDistFarOut,
     }
   }
 
@@ -229,6 +314,7 @@ export function computeTurnGuidance({
     return {
       newIdx: idx, banner, voiceEvent: null,
       newLastSpokenStepIdx: lastSpokenStepIdx, newVoiceStage: voiceStage, newPrevDistToTurn: prevDistToTurn,
+      newLastFarOutStepIdx: lastFarOutStepIdx, newPrevDistFarOut: prevDistFarOut,
     }
   }
 
@@ -242,7 +328,61 @@ export function computeTurnGuidance({
   const stageBefore = isFirstSampleForStep ? 0 : voiceStage
   const priorDist    = isFirstSampleForStep ? null : prevDistToTurn
 
-  const { early, main, final } = scaledVoiceThresholds(announceStep.distance)
+  const { early, main, final } = speedScaledThresholds(speedMps, announceStep.distance)
+  // farOut only applies to genuinely long (highway-length) upcoming steps —
+  // same isHighway-style gate as banner visibility above, at a farther
+  // distance. A short urban step with a coincidentally-far GPS reading
+  // never gets this cue, even if distToTurn happens to exceed VOICE_FAR_OUT_M.
+  //
+  // REAL-API FINDING: gating farOut purely on "is this the currently-tracked
+  // step" (the same idx !== lastSpokenStepIdx reset early/main/final use)
+  // means farOut only gets its FIRST sample once the driver has already
+  // advanced onto the step immediately before announceStep — and on real
+  // Google-returned routes that immediately-prior step is very often
+  // SHORTER than VOICE_FAR_OUT_M itself (verified against live Deerfoot
+  // Trail data: a 1392m and a 1787m real prior step both meant farOut's
+  // first-ever sample already measured <2000m, so isFirstSampleForStep's
+  // "first sample = plain membership, fire now" fallback fired immediately
+  // instead of getting real crossing-detection ticks on the way down from
+  // 2000m). Fix: track farOut's own "have we fired for this announceStep"
+  // state keyed to announceStep's identity (idx+1, i.e. the step AFTER the
+  // one currently being tracked for early/main/final), independently of the
+  // isFirstSampleForStep reset above — so farOut keeps accumulating
+  // crossing-detection samples across the step boundary instead of being
+  // wiped every time idx advances. lastSpokenStepIdx/voiceStage (the
+  // early/main/final tracker) are untouched by this — farOut has its own
+  // small piece of state layered on top, reusing the same crossing-detection
+  // helper and the same prevDistToTurn/newPrevDistToTurn plumbing (distToTurn
+  // is already computed against the same announceStep target regardless of
+  // which step idx currently is, so the same distance series is valid to
+  // compare across the idx boundary — nothing else needs to change).
+  const announceStepIdx = idx + 1 // index of announceStep within `steps` (idx itself if no nextStep, but farOut never applies to the last/arrival step anyway)
+  const farOutAlreadyFired = lastFarOutStepIdx === announceStepIdx
+  const farOut = (!farOutAlreadyFired && announceStep.distance >= VOICE_FAR_OUT_M) ? VOICE_FAR_OUT_M : null
+  // farOut's own crossing check runs against the SAME distToTurn series as
+  // early/main/final, but must NOT be reset just because idx advanced (see
+  // comment above) — so it gets prevDistFarOut (tracked independently,
+  // persisted regardless of step-tracking resets) rather than `priorDist`.
+  // Guard: prevDistFarOut is only a valid comparison point if it was
+  // measured against THIS SAME announceStepIdx — otherwise (route reload,
+  // or the driver having advanced past a PRIOR farOut-eligible step onto a
+  // later, unrelated one) it's stale distance-to-a-different-point data, and
+  // must be treated as "no prior sample" (fall back to plain membership)
+  // rather than compared directly, exactly like priorDist's isFirstSampleForStep
+  // guard above but keyed to announceStepIdx instead of idx.
+  const farOutTrackingSameStep = lastFarOutStepIdx === announceStepIdx || lastFarOutStepIdx === -1
+  const validPrevDistFarOut = farOutTrackingSameStep ? prevDistFarOut : null
+  let farOutCrossed = false
+  if (farOut != null) {
+    farOutCrossed = validPrevDistFarOut == null ? distToTurn <= farOut : (validPrevDistFarOut > farOut && distToTurn <= farOut)
+  }
+
+  // farOut and early/main/final are checked as two SEPARATE crossings (not
+  // merged into one priority chain) because they track independent state —
+  // folding a farOut crossing into `crossing` here would leak STAGE_RANK.farOut
+  // into newVoiceStage, which is keyed to lastSpokenStepIdx (idx) and must
+  // stay a pure early/main/final tracker. farOutCrossed already encodes "did
+  // farOut's own threshold get crossed this tick" independently.
   let crossing = nextVoiceStage(priorDist, distToTurn, { early, main, final }, stageBefore)
 
   // OVERSHOOT FIX: straight-line distance-to-turn is only monotonically
@@ -270,13 +410,23 @@ export function computeTurnGuidance({
   const JITTER_FLOOR_M      = 10
   const passedWithoutCrossing =
     !crossing && priorDist != null && priorDist <= OVERSHOOT_QUALIFY_M &&
-    (distToTurn - priorDist) > JITTER_FLOOR_M && stageBefore < 3
+    (distToTurn - priorDist) > JITTER_FLOOR_M && stageBefore < STAGE_RANK.final
   if (passedWithoutCrossing) {
-    crossing = { stage: 3, label: 'final' }
+    crossing = { stage: STAGE_RANK.final, label: 'final' }
   }
 
+  // early/main/final takes priority over farOut if both would cross on the
+  // exact same tick (a big single-tick GPS jump) — the more urgent, closer
+  // cue is what the driver needs to hear. farOut only surfaces as the
+  // voiceEvent when nothing more urgent fired this tick.
+  const firingFarOut = !crossing && farOutCrossed
+  if (firingFarOut) crossing = { stage: STAGE_RANK.farOut, label: 'farOut' }
+
   const voiceEvent  = crossing ? { step: announceStep, distToTurn, stage: crossing.label } : null
-  const newVoiceStage = crossing ? crossing.stage : stageBefore
+  // newVoiceStage (the early/main/final tracker) must NOT advance when the
+  // only thing that fired was farOut — farOut has its own independent state
+  // below, and early/main/final still need their own untouched first crossing.
+  const newVoiceStage = (crossing && !firingFarOut) ? crossing.stage : stageBefore
 
   // Advance AT MOST ONE step per tick — never leapfrog two short steps in
   // the same call. If the driver has genuinely passed two turns between
@@ -287,6 +437,18 @@ export function computeTurnGuidance({
   const stepPassed = distToTurn < STEP_PASSED_M || passedWithoutCrossing
   const newIdx = (idx < steps.length - 1 && stepPassed) ? idx + 1 : idx
 
+  // farOut's own state: mark announceStepIdx as fired once it actually
+  // fires (voiceEvent.stage === 'farOut'), and keep accumulating
+  // prevDistFarOut every live tick regardless of step advances — this is
+  // exactly what lets it survive the idx boundary (see REAL-API FINDING
+  // comment above). Reset to "not fired yet" only once the driver moves on
+  // to a genuinely different announceStep (tracked implicitly: farOut is
+  // simply never checked again once farOutAlreadyFired is true for that
+  // step, and a NEW announceStep after advancing gets a fresh comparison
+  // against lastFarOutStepIdx next call).
+  const newLastFarOutStepIdx = firingFarOut ? announceStepIdx : lastFarOutStepIdx
+  const newPrevDistFarOut = farOut != null ? distToTurn : prevDistFarOut
+
   return {
     newIdx,
     banner,
@@ -294,5 +456,7 @@ export function computeTurnGuidance({
     newLastSpokenStepIdx: idx,
     newVoiceStage: newIdx === idx ? newVoiceStage : 0,
     newPrevDistToTurn: newIdx === idx ? distToTurn : null,
+    newLastFarOutStepIdx,
+    newPrevDistFarOut,
   }
 }

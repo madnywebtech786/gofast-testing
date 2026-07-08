@@ -16,6 +16,15 @@ const REROUTE_COOLDOWN_MS    = 20000
 // Trigger arrival when driver is within this radius of the stop (metres)
 const ARRIVAL_RADIUS_M       = 30
 
+// Speed EMA smoothing factor (see smoothedSpeedRef above) — higher = less
+// smoothing/more responsive, lower = smoother but laggier. 0.3 ~= a 2-3
+// tick effective window, enough to kill GPS jitter without meaningfully
+// delaying speed-scaled voice thresholds from tracking real speed changes.
+const SPEED_EMA_ALPHA        = 0.3
+// Discard an instantaneous speed sample above this (a GPS position jump,
+// not real driving) so one bad fix can't spike the EMA. 60 m/s = 216 km/h.
+const SPEED_SPIKE_MAX_MPS    = 60
+
 // Turn-by-turn step-advance + voice-stage thresholds now live in
 // src/lib/turnGuidance.js (computeTurnGuidance) so they're unit-testable with
 // synthetic GPS ticks (see scripts/test-turn-guidance.mjs). That file's header
@@ -226,6 +235,22 @@ export default function DriverMap({
   // sparse GPS gap can't jump clean over a voice cue's distance band (see
   // BUG 3 in turnGuidance.js). null = no valid previous sample yet.
   const prevDistToTurnRef  = useRef(null)
+  // farOut (2km highway advisory) tracks its own state SEPARATELY from
+  // lastSpokenStepRef/voiceStageRef/prevDistToTurnRef above — it must survive
+  // a step-index advance, unlike early/main/final (see the REAL-API FINDING
+  // comment in turnGuidance.js for why: verified against live Deerfoot Trail
+  // data that gating farOut on the same per-step reset made it fire late/
+  // immediately instead of getting real crossing-detection ticks toward 2km).
+  const lastFarOutStepIdxRef = useRef(-1)
+  const prevDistFarOutRef    = useRef(null)
+
+  // Speed estimation for speed-scaled voice thresholds (turnGuidance.js).
+  // pos.coords.speed is unreliable (often null on iOS Safari), so speed is
+  // derived from consecutive GPS fixes instead: distance/time between this
+  // tick and the last one, smoothed with a short EMA to kill GPS jitter
+  // without adding meaningful lag (alpha=0.3 ~= 2-3 tick effective window).
+  const lastFixRef         = useRef(null) // { lng, lat, t } from the previous watchPosition tick
+  const smoothedSpeedRef   = useRef(0)    // EMA speed, metres/second
 
   // Active leg corridor coords [[lng,lat],...] for off-route detection
   const corridorCoordsRef  = useRef([])
@@ -407,6 +432,8 @@ export default function DriverMap({
         lastSpokenStepRef.current = -1
         voiceStageRef.current     = 0
         prevDistToTurnRef.current = null
+        lastFarOutStepIdxRef.current = -1
+        prevDistFarOutRef.current    = null
       }
 
       offRouteSinceRef.current = null
@@ -458,7 +485,7 @@ export default function DriverMap({
   //
   // `startIdx` non-null = called from leg-load seed (don't write back refs,
   // don't fire voice). null = live GPS tick.
-  const updateTurnBannerInternal = useCallback((steps, startIdx, lng, lat) => {
+  const updateTurnBannerInternal = useCallback((steps, startIdx, lng, lat, speedMps = 0) => {
     if (!steps.length) return
 
     const isLiveGps = startIdx == null
@@ -473,6 +500,9 @@ export default function DriverMap({
       voiceStage:        voiceStageRef.current,
       prevDistToTurn:    prevDistToTurnRef.current,
       liveGps:           isLiveGps,
+      speedMps,
+      lastFarOutStepIdx: lastFarOutStepIdxRef.current,
+      prevDistFarOut:    prevDistFarOutRef.current,
     })
 
     if (isLiveGps) {
@@ -480,6 +510,8 @@ export default function DriverMap({
       lastSpokenStepRef.current = result.newLastSpokenStepIdx
       voiceStageRef.current     = result.newVoiceStage
       prevDistToTurnRef.current = result.newPrevDistToTurn
+      lastFarOutStepIdxRef.current = result.newLastFarOutStepIdx
+      prevDistFarOutRef.current    = result.newPrevDistFarOut
     }
 
     if (!result.banner) {
@@ -501,10 +533,10 @@ export default function DriverMap({
   updateTurnBannerInternalRef.current = updateTurnBannerInternal
 
   // ── GPS-tick entry point ──────────────────────────────────────────────────
-  const updateTurnBanner = useCallback((lng, lat) => {
+  const updateTurnBanner = useCallback((lng, lat, speedMps = 0) => {
     const steps = stepsRef.current
     if (!steps.length) return
-    updateTurnBannerInternalRef.current?.(steps, null, lng, lat)
+    updateTurnBannerInternalRef.current?.(steps, null, lng, lat, speedMps)
   }, [])
 
   // Lock follow on a known position with the chosen orientation, like the
@@ -911,8 +943,24 @@ export default function DriverMap({
             const { longitude: lng, latitude: lat, heading } = pos.coords
             driverPosRef.current = { lng, lat }
 
+            // Derive speed from consecutive GPS fixes (pos.coords.speed is
+            // unreliable — often null on iOS Safari) and smooth with an EMA.
+            // See smoothedSpeedRef/SPEED_EMA_ALPHA declarations above.
+            const fixT = pos.timestamp
+            const prevFix = lastFixRef.current
+            if (prevFix) {
+              const dtSeconds = (fixT - prevFix.t) / 1000
+              if (dtSeconds > 0) {
+                const instantSpeed = haversineM(prevFix, { lng, lat }) / dtSeconds
+                if (instantSpeed <= SPEED_SPIKE_MAX_MPS) {
+                  smoothedSpeedRef.current = SPEED_EMA_ALPHA * instantSpeed + (1 - SPEED_EMA_ALPHA) * smoothedSpeedRef.current
+                }
+              }
+            }
+            lastFixRef.current = { lng, lat, t: fixT }
+
             updateDriverMarker(map, lng, lat, heading)
-            updateTurnBanner(lng, lat)
+            updateTurnBanner(lng, lat, smoothedSpeedRef.current)
             checkOffRoute(lng, lat)
 
             // Arrival detection
